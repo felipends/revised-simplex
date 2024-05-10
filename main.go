@@ -221,6 +221,7 @@ func main() {
 	currentBase := mat.DenseCopyOf(initialBase)
 	currentSolution := mat.DenseCopyOf(&initialSolution)
 	var csolaux fmt.Formatter
+	var dualSolution mat.Dense
 	for {
 		//compute basic solution
 		currentSolution.Solve(currentBase, consRhs)
@@ -234,6 +235,7 @@ func main() {
 
 		dualaux := mat.Formatted(&dual, mat.Prefix("     "), mat.Squeeze())
 		fmt.Printf("p' = %v\n", dualaux)
+		dualSolution = *mat.DenseCopyOf(&dual)
 
 		//calculate reduced costs (pricing)
 		reducedCosts := make([]float64, len(objCoefsVec))
@@ -372,11 +374,14 @@ func main() {
 
 	}
 	fmt.Println(dualVarsCons)
+	fmt.Println("Dual solution: ")
+	dualaux := mat.Formatted(&dualSolution, mat.Prefix("     "), mat.Squeeze())
+	fmt.Printf("p' = %v\n", dualaux)
 
+	fmt.Println("\n--------- Sensitivity analysis ---------")
 	//sensitivity analysis
 	var beta mat.Dense
 	beta.Inverse(currentBase)
-	fmt.Printf("B = %v\n", baseaux)
 	bounds := [][]float64{}
 	for i := range beta.RawMatrix().Cols {
 		minBound := math.Inf(1)
