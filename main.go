@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -10,12 +11,116 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lukpank/go-glpk/glpk"
 	"gonum.org/v1/gonum/mat"
-	"gonum.org/v1/gonum/stat/combin"
 )
 
+const (
+	//options
+	SOLVE    = "1"
+	GENERATE = "2"
+
+	//constants for simplex
+	BIGM = float64(10e10)
+)
+
+// generate instance from an mps file using go-mps package
+func generateInstanceFromMPS(filename string) {
+	lp := glpk.New()
+	defer lp.Delete()
+	lp.ReadMPS(glpk.MPS_FILE, nil, filename)
+	var newInputStr string
+
+	newInputStr += fmt.Sprintln("min")
+	//populate obj function
+	for c := range lp.NumCols() {
+		newInputStr += fmt.Sprintf("%vx%v", lp.ObjCoef(c), c+1)
+		if c < lp.NumCols()-1 {
+			newInputStr += " + "
+		}
+	}
+	newInputStr += "\nst\n"
+
+	//populate constraints
+	rowSignal := []string{}
+	rowsRhs := []float64{}
+	rowsVec := [][]float64{}
+	for r := range lp.NumRows() + 1 {
+		rowVec := make([]float64, lp.NumCols())
+		if r == 0 {
+			continue
+		}
+
+		idxs, row := lp.MatRow(r)
+		for i, v := range idxs {
+			if v == 0 {
+				continue
+			}
+			rowVec[v-1] = row[i]
+		}
+		if lp.RowLB(r) == -math.MaxFloat64 {
+			rowSignal = append(rowSignal, "<=")
+			rowsRhs = append(rowsRhs, lp.RowUB(r))
+		} else if lp.RowUB(r) == math.MaxFloat64 {
+			rowsRhs = append(rowsRhs, lp.RowLB(r))
+			rowSignal = append(rowSignal, ">=")
+		} else {
+			rowsRhs = append(rowsRhs, lp.RowLB(r))
+			rowSignal = append(rowSignal, "=")
+		}
+		rowsVec = append(rowsVec, rowVec)
+	}
+
+	for i, r := range rowsVec {
+		for l := range r {
+			newInputStr += fmt.Sprintf("%vx%v", r[l], l+1)
+			if l < len(r) {
+				newInputStr += " + "
+			}
+		}
+		newInputStr += fmt.Sprintf("%v %v\n", rowSignal[i], rowsRhs[i])
+	}
+
+	for c := range lp.NumCols() {
+		newInputStr += fmt.Sprintf("x%v", c+1)
+		if c < lp.NumCols()-1 {
+			newInputStr += ","
+		}
+	}
+	newInputStr += " >= 0"
+
+	charBuff := []byte(newInputStr)
+
+	f, err := os.Create("testInput.txt")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	_, err = f.Write(charBuff)
+	if err != nil {
+		panic(err)
+	}
+
+	os.Exit(0)
+}
+
 func main() {
-	inputFile, err := os.Open(os.Args[1])
+	// option 1 solve instance from file <filename>
+	// option 2 generate instance from mps file <filename>
+	if len(os.Args) != 3 {
+		panic(errors.New("wrong number of arguments. Usage: go run main.go <option (1/2)> <filename>"))
+	}
+
+	switch option := os.Args[1]; option {
+	case SOLVE:
+	case GENERATE:
+		generateInstanceFromMPS(os.Args[2])
+	}
+
+	//epsilon for precision reasons
+	epsilon := math.Nextafter(1, 2) - 1
+	inputFile, err := os.Open(os.Args[2])
 	if err != nil {
 		panic(err)
 	}
@@ -29,6 +134,7 @@ func main() {
 		panic(err)
 	}
 
+	//read instance
 	inputLines := strings.Split(string(inputData), "\n")
 	var problemSense string
 	var varsNames []string
@@ -37,7 +143,6 @@ func main() {
 	var consCoefsVec []float64
 	var consRhsVec []float64
 	numCons := 0
-	needSlack := false
 	var slackInCons []int
 	for i, str := range inputLines {
 		if i == 0 {
@@ -101,16 +206,12 @@ func main() {
 		if consRe1.Match([]byte(str)) {
 			consStrs = strings.Split(str, " >= ")
 			slackInCons = append(slackInCons, -1)
-
-			fmt.Println(str, needSlack)
 		}
 
 		consRe2 := regexp.MustCompile("( =)+")
 		if consRe2.Match([]byte(str)) {
 			consStrs = strings.Split(str, " = ")
 			slackInCons = append(slackInCons, 0)
-
-			fmt.Println(str, needSlack)
 		}
 		//TODO: if rhs is negative, multiply row by -1
 		consRhsValue, err := strconv.ParseFloat(consStrs[1], 64)
@@ -157,57 +258,86 @@ func main() {
 
 	dualMatrix := mat.DenseCopyOf(consCoefs.T())
 
-	//add slack variables to A and define B, and indexes in base
-	var indexesInBase []int
-	consCoefs = mat.DenseCopyOf(consCoefs.Grow(0, numCons))
 	numVars := len(objCoefsVec)
+	var initialBase *mat.Dense
+	indexesInBase := []int{}
+	//add slack variables to A if necessary to ensure that the problem is in standard form
+	var consNoNeedAux []int
+	column := 0
+	baseIdx := 0
+	var baseCoefs *mat.Dense
 	for c := range numCons {
-		consCoefs.Set(c, numVars+c, float64(slackInCons[c]))
+		if slackInCons[c] == 0 {
+			continue
+		} else if slackInCons[c] == 1 {
+			consNoNeedAux = append(consNoNeedAux, c)
+
+			baseColumn := make([]float64, numCons)
+			baseColumn[c] = 1
+
+			if initialBase == nil {
+				initialBase = mat.NewDense(numCons, 1, nil)
+				baseCoefs = mat.NewDense(1, 1, nil)
+			} else {
+				initialBase = mat.DenseCopyOf(initialBase.Grow(0, 1))
+				baseCoefs = mat.DenseCopyOf(baseCoefs.Grow(0, 1))
+			}
+
+			initialBase.SetCol(baseIdx, baseColumn)
+			indexesInBase = append(indexesInBase, numVars+column)
+			baseIdx++
+		}
+
+		consCoefs = mat.DenseCopyOf(consCoefs.Grow(0, 1))
+		consCoefs.Set(c, numVars+column, float64(slackInCons[c]))
+		column++
 		objCoefsVec = append(objCoefsVec, 0)
 		varsNames = append(varsNames, fmt.Sprintf("x_%v", numVars+c+1))
 		varsIndexes = append(varsIndexes, numVars+c)
 	}
+	numVars += column
+
+	if initialBase == nil || !(initialBase.RawMatrix().Cols == initialBase.RawMatrix().Rows && initialBase.RawMatrix().Cols == numCons) {
+		//add auxiliary variables
+		multi := 1
+		if problemSense == "max" {
+			multi = -1
+		}
+		column = 0
+		for c := range numCons {
+			if slices.Contains(consNoNeedAux, c) {
+				continue
+			}
+
+			//add aux var to constraint
+			consCoefs = mat.DenseCopyOf(consCoefs.Grow(0, 1))
+			consCoefs.Set(c, numVars+column, 1)
+
+			//add coeficient to obj function
+			objCoefsVec = append(objCoefsVec, float64(multi)*BIGM)
+
+			//add aux var to initialBase
+			if initialBase == nil {
+				initialBase = mat.NewDense(numCons, 1, nil)
+				baseCoefs = mat.NewDense(1, 1, nil)
+			} else {
+				initialBase = mat.DenseCopyOf(initialBase.Grow(0, 1))
+				baseCoefs = mat.DenseCopyOf(baseCoefs.Grow(0, 1))
+			}
+
+			initialBase.Set(c, baseIdx+column, 1)
+			baseCoefs.Set(0, baseIdx+column, float64(multi)*BIGM)
+			indexesInBase = append(indexesInBase, numVars+column)
+			column++
+			varsIndexes = append(varsIndexes, numVars+c)
+			varsNames = append(varsNames, fmt.Sprintf("x_%v", numVars+c+1))
+		}
+		numVars += column
+	}
+
 	aaux = mat.Formatted(consCoefs, mat.Prefix("    "), mat.Squeeze())
 	fmt.Printf("A = %v\n", aaux)
 	fmt.Printf("c = %v\n", objCoefsVec)
-
-	//define initial base
-	baseCoefs := mat.NewDense(1, numCons, nil)
-	initialBase := mat.NewDense(numCons, numCons, nil)
-	indexesInBase = append(indexesInBase, numVars+1)
-	possiblePermutations := combin.Combinations(len(varsIndexes), numCons)
-	for _, p := range possiblePermutations {
-		initialIdexesInBase := []int{}
-		for i, v := range p {
-			initialBase.SetCol(i, mat.DenseCopyOf(consCoefs.ColView(v)).RawMatrix().Data)
-			initialIdexesInBase = append(initialIdexesInBase, v)
-		}
-
-		//solve Bx=b to discover an initial feasible basis
-		var xb mat.Dense
-		err := xb.Solve(initialBase, consRhs)
-		if err != nil {
-			continue
-		}
-
-		allPositve := true
-		for _, x := range xb.RawMatrix().Data {
-			if x < 0 {
-				allPositve = false
-				break
-			}
-		}
-		fmt.Println(p)
-		if allPositve {
-			indexesInBase = initialIdexesInBase
-			for i, v := range indexesInBase {
-				baseCoefs.Set(0, i, objCoefsVec[v])
-			}
-			break
-		}
-	}
-
-	fmt.Printf("x in base = %v\n", indexesInBase)
 	baseaux := mat.Formatted(initialBase, mat.Prefix("    "), mat.Squeeze())
 	fmt.Printf("B = %v\n", baseaux)
 
@@ -233,8 +363,8 @@ func main() {
 		dual.Solve(currentBase.T(), baseCoefs.T())
 		dual = *mat.DenseCopyOf(dual.T())
 
-		dualaux := mat.Formatted(&dual, mat.Prefix("     "), mat.Squeeze())
-		fmt.Printf("p' = %v\n", dualaux)
+		// dualaux := mat.Formatted(&dual, mat.Prefix("     "), mat.Squeeze())
+		// fmt.Printf("p' = %v\n", dualaux)
 		dualSolution = *mat.DenseCopyOf(&dual)
 
 		//calculate reduced costs (pricing)
@@ -245,8 +375,8 @@ func main() {
 				continue
 			}
 			pa := mat.Dot(dual.RowView(0), consCoefs.ColView(i))
-			laux := mat.Formatted(consCoefs.ColView(i), mat.Prefix("     "), mat.Squeeze())
-			fmt.Printf("aj = %v\n", laux)
+			// laux := mat.Formatted(consCoefs.ColView(i), mat.Prefix("     "), mat.Squeeze())
+			// fmt.Printf("aj = %v\n", laux)
 
 			reducedCosts[i] = val - pa
 			fmt.Printf("c_%v = %v\n", i, reducedCosts[i])
@@ -264,12 +394,12 @@ func main() {
 		//compute u = Bˆ-1A_j for pricing
 		var u mat.Dense
 		u.Solve(currentBase, consCoefs.ColView(choosedI))
-		uaux := mat.Formatted(&u, mat.Prefix("    "), mat.Squeeze())
-		fmt.Printf("u = %v\n", uaux)
+		// uaux := mat.Formatted(&u, mat.Prefix("    "), mat.Squeeze())
+		// fmt.Printf("u = %v\n", uaux)
 
 		uNegative := true
-		for item := range u.RawMatrix().Data {
-			if item > 0 {
+		for _, item := range u.RawMatrix().Data {
+			if item > epsilon {
 				uNegative = false
 				break
 			}
@@ -302,8 +432,8 @@ func main() {
 		for k := range currentBase.RawMatrix().Rows {
 			currentBase.Set(k, leaveBaseIndex, consCoefs.At(k, choosedI))
 		}
-		baseaux = mat.Formatted(currentBase, mat.Prefix("    "), mat.Squeeze())
-		fmt.Printf("B = %v\n", baseaux)
+		// baseaux = mat.Formatted(currentBase, mat.Prefix("    "), mat.Squeeze())
+		// fmt.Printf("B = %v\n", baseaux)
 	}
 
 	fmt.Println(indexesInBase)
@@ -317,7 +447,7 @@ func main() {
 		solutionValue += currentSolution.At(i, 0) * objCoefsVec[v]
 	}
 
-	fmt.Println("Vars in solution =", varsInSolution, "Z =", solutionValue)
+	fmt.Println("-------------------- SOLUTION ---------------\nVars in solution =", varsInSolution, "Z =", solutionValue)
 
 	//print dual problem
 	fodual := ""
