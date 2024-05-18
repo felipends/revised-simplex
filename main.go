@@ -21,7 +21,7 @@ const (
 	GENERATE = "2"
 
 	//constants for simplex
-	BIGM = float64(10e10)
+	BIGM = float64(1e6)
 )
 
 // generate instance from an mps file using go-mps package
@@ -34,7 +34,7 @@ func generateInstanceFromMPS(filename string) {
 	newInputStr += fmt.Sprintln("min")
 	//populate obj function
 	for c := range lp.NumCols() {
-		newInputStr += fmt.Sprintf("%vx%v", lp.ObjCoef(c), c+1)
+		newInputStr += fmt.Sprintf("%vx%v", lp.ObjCoef(c+1), c+1)
 		if c < lp.NumCols()-1 {
 			newInputStr += " + "
 		}
@@ -119,7 +119,8 @@ func main() {
 	}
 
 	//epsilon for precision reasons
-	epsilon := math.Nextafter(1, 2) - 1
+	const epsilon = float64(1e-8)
+	fmt.Println(epsilon)
 	inputFile, err := os.Open(os.Args[2])
 	if err != nil {
 		panic(err)
@@ -256,7 +257,7 @@ func main() {
 	baux := mat.Formatted(consRhs, mat.Prefix("    "), mat.Squeeze())
 	fmt.Printf("b = %v\n", baux)
 
-	dualMatrix := mat.DenseCopyOf(consCoefs.T())
+	// dualMatrix := mat.DenseCopyOf(consCoefs.T())
 
 	numVars := len(objCoefsVec)
 	var initialBase *mat.Dense
@@ -352,12 +353,22 @@ func main() {
 	currentSolution := mat.DenseCopyOf(&initialSolution)
 	var csolaux fmt.Formatter
 	var dualSolution mat.Dense
+	iter := 0
 	for {
+		if iter == 10000 {
+			//break
+		}
+		iter++
 		//compute basic solution
+		currentSolution.Reset()
 		currentSolution.Solve(currentBase, consRhs)
 		csolaux = mat.Formatted(currentSolution, mat.Prefix("     "), mat.Squeeze())
 		fmt.Printf("xB = %v\n", csolaux)
-
+		solutionValue := float64(0)
+		for i, v := range indexesInBase {
+			solutionValue += currentSolution.At(i, 0) * objCoefsVec[v]
+		}
+		fmt.Printf("Z = %v\n", solutionValue)
 		//compute dual solution values for pricing (p')
 		var dual mat.Dense
 		dual.Solve(currentBase.T(), baseCoefs.T())
@@ -370,6 +381,7 @@ func main() {
 		//calculate reduced costs (pricing)
 		reducedCosts := make([]float64, len(objCoefsVec))
 		choosedI := -1
+		flagC := false
 		for i, val := range objCoefsVec {
 			if slices.Contains(indexesInBase, i) {
 				continue
@@ -380,9 +392,10 @@ func main() {
 
 			reducedCosts[i] = val - pa
 			fmt.Printf("c_%v = %v\n", i, reducedCosts[i])
-			if reducedCosts[i] < 0 {
+			if reducedCosts[i] < -epsilon && !flagC {
+				fmt.Printf("CHOOSED -> c_%v = %v\n", i, reducedCosts[i])
+				flagC = true
 				choosedI = i
-				break
 			}
 		}
 
@@ -391,44 +404,49 @@ func main() {
 			break
 		}
 
-		//compute u = Bˆ-1A_j for pricing
+		//compute u = Bˆ-1*A_j for pricing
 		var u mat.Dense
 		u.Solve(currentBase, consCoefs.ColView(choosedI))
-		// uaux := mat.Formatted(&u, mat.Prefix("    "), mat.Squeeze())
-		// fmt.Printf("u = %v\n", uaux)
+		uaux := mat.Formatted(&u, mat.Prefix("    "), mat.Squeeze())
+		fmt.Printf("u = %v\n", uaux)
 
 		uNegative := true
 		for _, item := range u.RawMatrix().Data {
-			if item > epsilon {
+			if item >= epsilon {
 				uNegative = false
 				break
 			}
 		}
 
-		// problem is unlimited
+		// problem is unbounded
 		if uNegative {
-			break
+			panic("unbounded")
 		}
 
 		//minimal ratio test
-		minimalRatio := math.Inf(1)
+		minimalRatio := math.MaxFloat64
 		leaveBaseIndex := -1
 		for i, item := range u.RawMatrix().Data {
-			if item <= 0 {
+			if item < epsilon {
 				continue
 			}
-
+			if currentSolution.At(i, 0) < epsilon {
+				currentSolution.Set(i, 0, 0)
+			}
 			iRatio := currentSolution.At(i, 0) / item
-			if iRatio < minimalRatio {
+			fmt.Printf("x/u = %v\n%v\n", iRatio, i)
+			if iRatio < minimalRatio-epsilon {
 				minimalRatio = iRatio
 				leaveBaseIndex = i
+
+				fmt.Printf("LEAVING -> x/u = %v %v\n", iRatio, indexesInBase[i])
 			}
 		}
 
 		//form new basis by replacing leaveBaseIndex with choosedI
 		indexesInBase[leaveBaseIndex] = choosedI
 		baseCoefs.Set(0, leaveBaseIndex, objCoefsVec[choosedI])
-		fmt.Println(indexesInBase)
+		fmt.Println(indexesInBase, objCoefsVec)
 		for k := range currentBase.RawMatrix().Rows {
 			currentBase.Set(k, leaveBaseIndex, consCoefs.At(k, choosedI))
 		}
@@ -447,89 +465,89 @@ func main() {
 		solutionValue += currentSolution.At(i, 0) * objCoefsVec[v]
 	}
 
-	fmt.Println("-------------------- SOLUTION ---------------\nVars in solution =", varsInSolution, "Z =", solutionValue)
+	fmt.Println("-------------------- SOLUTION ---------------\nVars in solution =", varsInSolution, "\nZ =", solutionValue)
 
 	//print dual problem
-	fodual := ""
-	for i, c := range consRhsVec {
-		fodual += fmt.Sprintf("%vy%v ", c, i+1)
-		if i < len(consRhsVec)-1 {
-			fodual += "+ "
-		}
-	}
+	// fodual := ""
+	// for i, c := range consRhsVec {
+	// 	fodual += fmt.Sprintf("%vy%v ", c, i+1)
+	// 	if i < len(consRhsVec)-1 {
+	// 		fodual += "+ "
+	// 	}
+	// }
 
-	var matrixDualString []string
-	for i := range dualMatrix.RawMatrix().Rows {
-		consString := ""
-		for j := range dualMatrix.RawMatrix().Cols {
-			consString += fmt.Sprintf("%vy%v ", dualMatrix.At(i, j), j+1)
-			if j < dualMatrix.RawMatrix().Cols-1 {
-				consString += "+ "
-			}
-		}
-		if problemSense == "max" {
-			consString += fmt.Sprintf(">= %v", -1*objCoefsVec[i])
-		} else {
-			consString += fmt.Sprintf("<= %v", objCoefsVec[i])
-		}
-		matrixDualString = append(matrixDualString, consString)
-	}
-	fmt.Println("---------- DUAL ---------")
-	if problemSense == "max" {
-		fmt.Println("min")
-	} else {
-		fmt.Println("max")
-	}
-	fmt.Println(fodual)
-	fmt.Println("st")
-	for _, m := range matrixDualString {
-		fmt.Println(m)
-	}
-	dualVarsCons := ""
-	for c := range dualMatrix.RawMatrix().Cols {
-		dualVarsCons += fmt.Sprintf("y%v", c+1)
-		if problemSense == "min" {
-			if slackInCons[c] > 0 {
-				dualVarsCons += " <= 0\n"
-			} else {
-				dualVarsCons += " >= 0\n"
-			}
-		} else {
-			if slackInCons[c] > 0 {
-				dualVarsCons += " >= 0\n"
-			} else {
-				dualVarsCons += " <= 0\n"
-			}
-		}
+	// var matrixDualString []string
+	// for i := range dualMatrix.RawMatrix().Rows {
+	// 	consString := ""
+	// 	for j := range dualMatrix.RawMatrix().Cols {
+	// 		consString += fmt.Sprintf("%vy%v ", dualMatrix.At(i, j), j+1)
+	// 		if j < dualMatrix.RawMatrix().Cols-1 {
+	// 			consString += "+ "
+	// 		}
+	// 	}
+	// 	if problemSense == "max" {
+	// 		consString += fmt.Sprintf(">= %v", -1*objCoefsVec[i])
+	// 	} else {
+	// 		consString += fmt.Sprintf("<= %v", objCoefsVec[i])
+	// 	}
+	// 	matrixDualString = append(matrixDualString, consString)
+	// }
+	// fmt.Println("---------- DUAL ---------")
+	// if problemSense == "max" {
+	// 	fmt.Println("min")
+	// } else {
+	// 	fmt.Println("max")
+	// }
+	// fmt.Println(fodual)
+	// fmt.Println("st")
+	// for _, m := range matrixDualString {
+	// 	fmt.Println(m)
+	// }
+	// dualVarsCons := ""
+	// for c := range dualMatrix.RawMatrix().Cols {
+	// 	dualVarsCons += fmt.Sprintf("y%v", c+1)
+	// 	if problemSense == "min" {
+	// 		if slackInCons[c] > 0 {
+	// 			dualVarsCons += " <= 0\n"
+	// 		} else {
+	// 			dualVarsCons += " >= 0\n"
+	// 		}
+	// 	} else {
+	// 		if slackInCons[c] > 0 {
+	// 			dualVarsCons += " >= 0\n"
+	// 		} else {
+	// 			dualVarsCons += " <= 0\n"
+	// 		}
+	// 	}
 
-	}
-	fmt.Println(dualVarsCons)
+	// }
+	// fmt.Println(dualVarsCons)
 	fmt.Println("Dual solution: ")
 	dualaux := mat.Formatted(&dualSolution, mat.Prefix("     "), mat.Squeeze())
 	fmt.Printf("p' = %v\n", dualaux)
 
-	fmt.Println("\n--------- Sensitivity analysis ---------")
-	//sensitivity analysis
-	var beta mat.Dense
-	beta.Inverse(currentBase)
-	bounds := [][]float64{}
-	for i := range beta.RawMatrix().Cols {
-		minBound := math.Inf(1)
-		maxBound := math.Inf(-1)
-		for j := range beta.RawMatrix().Rows {
-			delta := -currentSolution.At(j, 0) / beta.At(j, i)
-			if beta.At(j, i) < 0 && delta < minBound {
-				minBound = delta
-			}
+	// fmt.Println("\n--------- Sensitivity analysis ---------")
+	// //sensitivity analysis
+	// var beta mat.Dense
+	// beta.Inverse(currentBase)
+	// bounds := [][]float64{}
+	// for i := range beta.RawMatrix().Cols {
+	// 	minBound := math.Inf(1)
+	// 	maxBound := math.Inf(-1)
+	// 	for j := range beta.RawMatrix().Rows {
+	// 		delta := -currentSolution.At(j, 0) / beta.At(j, i)
+	// 		if beta.At(j, i) < 0 && delta < minBound {
+	// 			minBound = delta
+	// 		}
 
-			if beta.At(j, i) > 0 && delta > maxBound {
-				maxBound = delta
-			}
-		}
-		bounds = append(bounds, []float64{minBound, maxBound})
-	}
+	// 		if beta.At(j, i) > 0 && delta > maxBound {
+	// 			maxBound = delta
+	// 		}
+	// 	}
+	// 	bounds = append(bounds, []float64{minBound, maxBound})
+	// }
 
-	for i, b := range bounds {
-		fmt.Println(b[0], ">= delta b", i+1, ">=", b[1])
-	}
+	// for i, b := range bounds {
+	// 	fmt.Println(b[0], ">= delta b", i+1, ">=", b[1])
+	// }
 }
