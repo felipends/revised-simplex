@@ -32,7 +32,7 @@ const (
 func generateInstanceFromMPS(filename string) {
 	lp := glpk.New()
 	defer lp.Delete()
-	lp.ReadMPS(glpk.MPS_FILE, nil, filename)
+	lp.ReadMPS(glpk.MPS_DECK, nil, filename)
 	var newInputStr string
 
 	newInputStr += fmt.Sprintln("min")
@@ -68,6 +68,13 @@ func generateInstanceFromMPS(filename string) {
 		} else if lp.RowUB(r) == math.MaxFloat64 {
 			rowsRhs = append(rowsRhs, lp.RowLB(r))
 			rowSignal = append(rowSignal, ">=")
+		} else if lp.RowUB(r) < math.MaxFloat64 && lp.RowLB(r) > -math.MaxFloat64 && lp.RowLB(r) != lp.RowUB(r) {
+			rowsRhs = append(rowsRhs, lp.RowLB(r))
+			rowSignal = append(rowSignal, ">=")
+			rowsVec = append(rowsVec, rowVec)
+
+			rowsRhs = append(rowsRhs, lp.RowUB(r))
+			rowSignal = append(rowSignal, "<=")
 		} else {
 			rowsRhs = append(rowsRhs, lp.RowLB(r))
 			rowSignal = append(rowSignal, "=")
@@ -88,9 +95,9 @@ func generateInstanceFromMPS(filename string) {
 	bdSigns := []string{">=", "<="}
 	for c := range lp.NumCols() {
 		for idx, s := range bdSigns {
-			if idx == 0 && lp.ColLB(c+1) == -math.MaxFloat64 {
+			if idx == 0 && (lp.ColLB(c+1) == -math.MaxFloat64 || lp.ColLB(c+1) == 0) {
 				continue
-			} else if idx == 1 && lp.ColUB(c+1) == math.MaxFloat64 {
+			} else if idx == 1 && (lp.ColUB(c+1) == math.MaxFloat64 || lp.ColUB(c+1) == 0) {
 				continue
 			}
 
@@ -98,7 +105,7 @@ func generateInstanceFromMPS(filename string) {
 				if c == k {
 					newInputStr += fmt.Sprintf("1x%v", c+1)
 				} else {
-					newInputStr += fmt.Sprintf("0x%v", c+1)
+					newInputStr += fmt.Sprintf("0x%v", k+1)
 				}
 				if k < lp.NumCols()-1 {
 					newInputStr += " + "
@@ -137,9 +144,19 @@ func generateInstanceFromMPS(filename string) {
 	os.Exit(0)
 }
 
-func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.Dense, objCoefsVec []float64, indexesInBase []int) ([]*mat.Dense, []int) {
-	currentSolution := mat.DenseCopyOf(initialSolution)
+func simplex(initialBase, consCoefs, consRhs *mat.Dense, objCoefsVec []float64, indexesInBase []int) ([]*mat.Dense, []int) {
+	consCoefs = mat.DenseCopyOf(consCoefs)
+	consRhs = mat.DenseCopyOf(consRhs)
+
+	numCons, numVars := consCoefs.Dims()
+	currentSolution := mat.NewDense(numCons, 1, nil)
 	currentBase := mat.DenseCopyOf(initialBase)
+
+	baseCoefs := mat.NewDense(1, numCons, nil)
+	for i := range numCons {
+		baseCoefs.Set(0, i, objCoefsVec[indexesInBase[i]])
+	}
+
 	var dualSolution *mat.Dense
 	iter := 0
 	for {
@@ -147,7 +164,7 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 			//break
 		}
 		iter++
-		//compute basic solution
+		//compute basic solution by solving Bx=b
 		currentSolution.Solve(currentBase, consRhs)
 		// csolaux = mat.Formatted(currentSolution, mat.Prefix("     "), mat.Squeeze())
 		// fmt.Printf("xB = %v\n", csolaux)
@@ -157,12 +174,13 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 		}
 		fmt.Printf("Z = %v\n", solutionValue)
 		//compute dual solution values for pricing (p')
-		inverseBases := mat.DenseCopyOf(currentBase)
+		//compute B^-1
+		inverseBases := mat.NewDense(numCons, numCons, nil)
 		inverseBases.Inverse(currentBase)
 
-		//cT*B^-1
+		//pT = cbT*B^-1
 		var dual mat.Dense
-		//baseCoefs == cT
+		//baseCoefs is already cbT
 		dual.Mul(baseCoefs, inverseBases)
 
 		// dualaux := mat.Formatted(&dual, mat.Prefix("     "), mat.Squeeze())
@@ -170,42 +188,38 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 		dualSolution = mat.DenseCopyOf(&dual)
 
 		//calculate reduced costs (pricing)
-		reducedCosts := make([]float64, len(objCoefsVec))
-		choosedI := -1
-		flagC := false
-		for i, val := range objCoefsVec {
-			if slices.Contains(indexesInBase, i) {
+		reducedCosts := make([]float64, numVars)
+		chosedJ := -1
+		for j := range numVars {
+			if slices.Contains(indexesInBase, j) {
 				continue
 			}
 			//pT*Aj
-			pa := mat.Dot(dual.RowView(0), consCoefs.ColView(i))
-			// laux := mat.Formatted(consCoefs.ColView(i), mat.Prefix("     "), mat.Squeeze())
-			// fmt.Printf("aj = %v\n", laux)
-
-			reducedCosts[i] = val - pa
+			pa := mat.Dot(dual.RowView(0), consCoefs.ColView(j))
+			//c'j = cj - pT*Aj
+			reducedCosts[j] = objCoefsVec[j] - pa
 			// fmt.Printf("c_%v = %v\n", i, reducedCosts[i])
-			if reducedCosts[i] < -epsilon && !flagC {
+			if reducedCosts[j] < -epsilon {
 				// fmt.Printf("CHOOSED -> c_%v = %v\n", i, reducedCosts[i])
-				flagC = true
-				choosedI = i
+				chosedJ = j
 				break
 			}
 		}
 
 		//optimality condition
-		if choosedI == -1 {
+		if chosedJ == -1 {
 			break
 		}
 
 		//compute u = Bˆ-1*A_j for pricing
 		var u mat.Dense
-		u.Mul(inverseBases, consCoefs.ColView(choosedI))
+		u.Mul(inverseBases, consCoefs.ColView(chosedJ))
 		// uaux := mat.Formatted(&u, mat.Prefix("    "), mat.Squeeze())
 		// fmt.Printf("u = %v\n", uaux)
 
 		uNegative := true
 		for _, item := range u.RawMatrix().Data {
-			if item >= epsilon {
+			if item > -epsilon {
 				uNegative = false
 				break
 			}
@@ -221,16 +235,17 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 		//minimal ratio test
 		minimalRatio := math.MaxFloat64
 		leaveBaseIndex := -1
-		for i, item := range u.RawMatrix().Data {
-			if item < epsilon2 {
+		uVec := u.RawMatrix().Data
+		for i := range numCons {
+			if uVec[i] < epsilon2 {
 				continue
 			}
-			if math.Abs(currentSolution.At(i, 0)) < epsilon {
+			if currentSolution.At(i, 0) < epsilon2 {
 				currentSolution.Set(i, 0, 0)
 			}
-			iRatio := currentSolution.At(i, 0) / item
+			iRatio := currentSolution.At(i, 0) / uVec[i]
 			// fmt.Printf("x/u = %v\n%v\n", iRatio, i)
-			if iRatio < minimalRatio-epsilon || (iRatio == minimalRatio && indexesInBase[leaveBaseIndex] > indexesInBase[i]) {
+			if iRatio < minimalRatio-epsilon || (leaveBaseIndex != -1 && (math.Abs(math.Abs(iRatio)-math.Abs(minimalRatio)) <= epsilon2 && indexesInBase[leaveBaseIndex] > indexesInBase[i])) {
 				minimalRatio = iRatio
 				leaveBaseIndex = i
 
@@ -238,17 +253,17 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 			}
 		}
 
-		//form new basis by replacing leaveBaseIndex with choosedI
-		indexesInBase[leaveBaseIndex] = choosedI
-		baseCoefs.Set(0, leaveBaseIndex, objCoefsVec[choosedI])
+		fmt.Printf("-------------------- BASE CHANGE %v -> %v ----------------------\n", indexesInBase[leaveBaseIndex], chosedJ)
+		//form new basis by replacing leaveBaseIndex with chosedJ
+		indexesInBase[leaveBaseIndex] = chosedJ
+		baseCoefs.Set(0, leaveBaseIndex, objCoefsVec[chosedJ])
 		// fmt.Println(indexesInBase, objCoefsVec)
 		for k := range currentBase.RawMatrix().Rows {
-			currentBase.Set(k, leaveBaseIndex, consCoefs.At(k, choosedI))
+			currentBase.Set(k, leaveBaseIndex, consCoefs.At(k, chosedJ))
 		}
 		// baseaux = mat.Formatted(currentBase, mat.Prefix("    "), mat.Squeeze())
 		// fmt.Printf("B = %v\n", baseaux)
 		fmt.Printf("-------------------- ITERATION %v ----------------------\n", iter)
-		fmt.Printf("-------------------- BASE CHANGE %v -> %v ----------------------\n", indexesInBase[leaveBaseIndex], choosedI)
 	}
 
 	return []*mat.Dense{currentSolution, currentBase, dualSolution, baseCoefs}, indexesInBase
@@ -520,7 +535,7 @@ func main() {
 	}
 	fmt.Println(newObjCoeffsVec, objCoefsVec, originalProblemObjVec)
 	//solve auxiliary problem
-	resultMatrices, indexesInBase := simplex(initialBase, &initialSolution, consCoefs, consRhs, baseCoefs, newObjCoeffsVec, indexesInBase)
+	resultMatrices, indexesInBase := simplex(initialBase, consCoefs, consRhs, newObjCoeffsVec, indexesInBase)
 	currentSolution := mat.DenseCopyOf(resultMatrices[0])
 	currentBase := mat.DenseCopyOf(resultMatrices[1])
 	dualSolution := mat.DenseCopyOf(resultMatrices[2])
@@ -528,7 +543,7 @@ func main() {
 
 	//check if the value of auxiliar problem is 0
 	originalProblmSolutionValue := float64(0)
-	for i, _ := range indexesInBase {
+	for i := range indexesInBase {
 		originalProblmSolutionValue += currentSolution.At(i, 0) * baseCoefs.At(0, i)
 		fmt.Println(currentSolution.At(i, 0))
 	}
@@ -617,10 +632,11 @@ func main() {
 		baseCoefs.Set(0, n, objCoefsVec[indexesInBase[n]])
 	}
 	//apply simplex to the original problem with the found basis
-	resultMatrices, indexesInBase = simplex(currentBase, &initialSolution, originalProblemConsCoefs, consRhs, baseCoefs, originalProblemObjVec, indexesInBase)
+	resultMatrices, indexesInBase = simplex(currentBase, originalProblemConsCoefs, consRhs, originalProblemObjVec, indexesInBase)
 	currentSolution = resultMatrices[0]
 	currentBase = resultMatrices[1]
 	dualSolution = resultMatrices[2]
+	baseCoefs = resultMatrices[3]
 
 	// indexesInBaseSorted := indexesInBase
 	// slices.SortFunc(indexesInBaseSorted, func(i, j int) int {
