@@ -24,7 +24,7 @@ const (
 	BIGM = float64(1)
 
 	//epsilon for precision reasons
-	epsilon  = float64(1e-6)
+	epsilon  = float64(1e-5)
 	epsilon2 = float64(1e-6)
 )
 
@@ -162,6 +162,7 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 
 		//cT*B^-1
 		var dual mat.Dense
+		//baseCoefs == cT
 		dual.Mul(baseCoefs, inverseBases)
 
 		// dualaux := mat.Formatted(&dual, mat.Prefix("     "), mat.Squeeze())
@@ -182,9 +183,9 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 			// fmt.Printf("aj = %v\n", laux)
 
 			reducedCosts[i] = val - pa
-			fmt.Printf("c_%v = %v\n", i, reducedCosts[i])
+			// fmt.Printf("c_%v = %v\n", i, reducedCosts[i])
 			if reducedCosts[i] < -epsilon && !flagC {
-				fmt.Printf("CHOOSED -> c_%v = %v\n", i, reducedCosts[i])
+				// fmt.Printf("CHOOSED -> c_%v = %v\n", i, reducedCosts[i])
 				flagC = true
 				choosedI = i
 				break
@@ -224,7 +225,7 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 			if item < epsilon2 {
 				continue
 			}
-			if currentSolution.At(i, 0) <= epsilon2 {
+			if math.Abs(currentSolution.At(i, 0)) < epsilon {
 				currentSolution.Set(i, 0, 0)
 			}
 			iRatio := currentSolution.At(i, 0) / item
@@ -247,6 +248,7 @@ func simplex(initialBase, initialSolution, consCoefs, consRhs, baseCoefs *mat.De
 		// baseaux = mat.Formatted(currentBase, mat.Prefix("    "), mat.Squeeze())
 		// fmt.Printf("B = %v\n", baseaux)
 		fmt.Printf("-------------------- ITERATION %v ----------------------\n", iter)
+		fmt.Printf("-------------------- BASE CHANGE %v -> %v ----------------------\n", indexesInBase[leaveBaseIndex], choosedI)
 	}
 
 	return []*mat.Dense{currentSolution, currentBase, dualSolution, baseCoefs}, indexesInBase
@@ -544,7 +546,6 @@ func main() {
 		}
 	}
 	fmt.Println("has aux", hasAux)
-
 	//drive auxiliary variables from basis by pivoting them
 	if hasAux {
 		for i, item := range indexesInBase {
@@ -611,7 +612,10 @@ func main() {
 		}
 	}
 	fmt.Println("has aux", hasAux)
-
+	//update baseCoefs with the original obj coefs
+	for n := range numCons {
+		baseCoefs.Set(0, n, objCoefsVec[indexesInBase[n]])
+	}
 	//apply simplex to the original problem with the found basis
 	resultMatrices, indexesInBase = simplex(currentBase, &initialSolution, originalProblemConsCoefs, consRhs, baseCoefs, originalProblemObjVec, indexesInBase)
 	currentSolution = resultMatrices[0]
@@ -651,27 +655,27 @@ func main() {
 
 	fmt.Println("-------------------- SOLUTION ---------------\nVars in solution =", varsInSolution, "\nZ =", solutionValue)
 
-	unsortedIndexes := make([]int, len(indexesInBase))
-	copy(unsortedIndexes, indexesInBase)
-	slices.SortFunc(indexesInBase, func(i, j int) int {
-		return i - j
-	})
-	fmt.Println(indexesInBase, unsortedIndexes)
+	// unsortedIndexes := make([]int, len(indexesInBase))
+	// copy(unsortedIndexes, indexesInBase)
+	// slices.SortFunc(indexesInBase, func(i, j int) int {
+	// 	return i - j
+	// })
+	// fmt.Println(indexesInBase, unsortedIndexes)
 
-	auxiliarBase := mat.DenseCopyOf(currentBase)
-	auxiliarSolution := mat.DenseCopyOf(currentSolution)
-	for i, val := range indexesInBase {
-		auxiliarBase.SetCol(i, mat.DenseCopyOf(consCoefs.ColView(val)).RawMatrix().Data)
-		auxiliarSolution.Set(i, 0, currentSolution.At(slices.Index(unsortedIndexes, val), 0))
-	}
+	// auxiliarBase := mat.DenseCopyOf(currentBase)
+	// auxiliarSolution := mat.DenseCopyOf(currentSolution)
+	// for i, val := range indexesInBase {
+	// 	auxiliarBase.SetCol(i, mat.DenseCopyOf(consCoefs.ColView(val)).RawMatrix().Data)
+	// 	auxiliarSolution.Set(i, 0, currentSolution.At(slices.Index(unsortedIndexes, val), 0))
+	// }
 
-	sanityTest := mat.DenseCopyOf(currentSolution)
-	sanityTest.Mul(auxiliarBase, auxiliarSolution)
-	sanityaux := mat.Formatted(sanityTest, mat.Prefix("     "), mat.Squeeze())
-	fmt.Printf("BX = %v\n", sanityaux)
+	// sanityTest := mat.DenseCopyOf(currentSolution)
+	// sanityTest.Mul(auxiliarBase, auxiliarSolution)
+	// sanityaux := mat.Formatted(sanityTest, mat.Prefix("     "), mat.Squeeze())
+	// fmt.Printf("BX = %v\n", sanityaux)
 
-	sanityaux2 := mat.Formatted(consRhs, mat.Prefix("    "), mat.Squeeze())
-	fmt.Printf("b = %v\n", sanityaux2)
+	// sanityaux2 := mat.Formatted(consRhs, mat.Prefix("    "), mat.Squeeze())
+	// fmt.Printf("b = %v\n", sanityaux2)
 	//print dual problem
 	// fodual := ""
 	// for i, c := range consRhsVec {
