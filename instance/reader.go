@@ -1,7 +1,9 @@
 package instance
 
 import (
+	"fmt"
 	"math"
+	"runtime"
 
 	"github.com/lukpank/go-glpk/glpk"
 	"q.log/simplex/model"
@@ -20,11 +22,14 @@ func NewReader(filename string) *Reader {
 
 // ConstructModelFromFile returns a *Model in standard form
 func (r *Reader) ConstructModelFromFile() *model.Model {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	lp := glpk.New()
 	defer lp.Delete()
-	lp.ReadMPS(glpk.MPS_FILE, nil, r.filename)
+	lp.ReadMPS(glpk.MPS_DECK, nil, r.filename)
 
 	m := model.NewModel(lp.NumRows(), lp.NumCols())
+	fmt.Println(lp.NumCols())
 
 	//populate obj function
 	var cVec []float64
