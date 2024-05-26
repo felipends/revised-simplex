@@ -26,7 +26,7 @@ func (r *Reader) ConstructModelFromFile() *model.Model {
 	defer runtime.UnlockOSThread()
 	lp := glpk.New()
 	defer lp.Delete()
-	lp.ReadMPS(glpk.MPS_DECK, nil, r.filename)
+	lp.ReadMPS(glpk.MPS_FILE, nil, r.filename)
 
 	m := model.NewModel(lp.NumRows(), lp.NumCols())
 	fmt.Println(lp.NumCols())
@@ -108,12 +108,15 @@ func (r *Reader) ConstructModelFromFile() *model.Model {
 	for r := range m.NumRows {
 		//adds slack and surplus variables
 		if rowSignal[r] == "=" {
+			m.NeedArtificial = append(m.NeedArtificial, r)
 			continue
 		} else if rowSignal[r] == "<=" {
 			colVec := make([]float64, m.NumRows)
 			colVec[r] = 1
+			m.SlackIndexes = append(m.SlackIndexes, m.NumCols)
 			m.AddCol(colVec, 0)
 		} else if rowSignal[r] == ">=" {
+			m.SlackIndexes = append(m.SlackIndexes, m.NumCols)
 			colVec := make([]float64, m.NumRows)
 			colVec[r] = -1
 			m.AddCol(colVec, 0)

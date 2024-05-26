@@ -12,17 +12,32 @@ import (
 const (
 	epsilon1 = 1e-5
 	epsilon2 = 1e-5
+	M        = float64(1)
 )
 
 func AddArtificialVariables(m *model.Model) *mat.Dense {
 	basis := mat.NewDense(m.NumRows, m.NumRows, nil)
+	basisIndex := 0
+	for c, v := range m.SlackIndexes {
+		colData := mat.DenseCopyOf(m.A.ColView(v)).RawMatrix().Data
+		basis.SetCol(c, colData)
+		m.V[v].IsBasic = true
+		basisIndex++
+	}
 	for r := range m.NumRows {
+		if !slices.Contains(m.NeedArtificial, r) {
+			continue
+		}
+		fmt.Println("passou aqui", r)
+
 		bRowVec := make([]float64, m.NumRows)
 		bRowVec[r] = 1
-		m.AddCol(bRowVec, 1e5)
+		m.AddCol(bRowVec, M)
 		m.AddArtificalVariable()
-		basis.SetCol(r, bRowVec)
+		basis.SetCol(basisIndex, bRowVec)
+		basisIndex++
 	}
+	PrintBasis(basis)
 
 	return basis
 }
@@ -32,6 +47,20 @@ func PrintBasis(basis *mat.Dense) {
 	fmt.Printf("B = %v\n", caux)
 	r, c := basis.Dims()
 	fmt.Println(r, c)
+}
+
+func DriveOutArtificialVars(m *model.Model, basis *mat.Dense) *mat.Dense {
+	newBasis := mat.DenseCopyOf(basis)
+	basisIndexes := []int{}
+	for i, v := range m.V {
+		if v.IsBasic {
+			basisIndexes = append(basisIndexes, i)
+		}
+	}
+
+	panic("TODO")
+
+	return newBasis
 }
 
 // Solve solves the model by the revised simplex method
@@ -50,7 +79,7 @@ func Solve(m *model.Model, basis *mat.Dense) *mat.Dense {
 	iter := 0
 	currentSolution := mat.NewDense(m.NumRows, 1, nil)
 	for {
-		if iter == 10000 {
+		if iter == 100 {
 			//break
 		}
 		iter++
@@ -60,9 +89,9 @@ func Solve(m *model.Model, basis *mat.Dense) *mat.Dense {
 
 		//compute basic solution by solving Bx=b
 		currentSolution.Mul(inverseBases, m.B)
-		for c := range m.NumCols {
-			if m.V[c].IsBasic {
-				m.X.Set(c, 0, currentSolution.At(slices.Index(basisIndexes, c), 0))
+		for i, v := range m.V {
+			if v.IsBasic {
+				m.X.Set(i, 0, currentSolution.At(slices.Index(basisIndexes, i), 0))
 			}
 		}
 
@@ -148,7 +177,7 @@ func Solve(m *model.Model, basis *mat.Dense) *mat.Dense {
 		basisIndexes[leaveBaseIndex] = chosedJ
 		m.V[chosedJ].IsBasic = true
 		basisCoefs.Set(0, leaveBaseIndex, m.C.RawMatrix().Data[chosedJ])
-		for k := range currentBasis.RawMatrix().Rows {
+		for k := range m.NumRows {
 			currentBasis.Set(k, leaveBaseIndex, m.A.At(k, chosedJ))
 		}
 		fmt.Printf("-------------------- ITERATION %v ----------------------\n", iter)

@@ -29,6 +29,9 @@ type Model struct {
 	//X values of the variables, i.e. the solution
 	X *mat.Dense
 
+	NeedArtificial []int
+	SlackIndexes   []int
+
 	NumRows int
 	NumCols int
 }
@@ -201,8 +204,17 @@ func (m *Model) AddArtificalVariable() {
 }
 
 func (m *Model) UpdateVariablesValues() {
+	for i, v := range m.V {
+		v.Value = m.X.At(i, 0)
+	}
+}
+
+func (m *Model) ModifyOriginalPorblem() {
 	for c := range m.NumCols {
-		m.V[c].Value = m.X.At(c, 0)
+		if m.V[c].IsArtificial {
+			continue
+		}
+		m.C.Set(0, c, 0)
 	}
 }
 
@@ -232,4 +244,6 @@ func (m *Model) PrintSolution() {
 	for c := range m.NumCols {
 		z += m.V[c].Value * m.C.At(0, c)
 	}
+
+	fmt.Printf("Z = %v\n", z)
 }
