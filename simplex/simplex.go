@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	epsilon1 = 1e-5
-	epsilon2 = 1e-5
-	M        = float64(1)
+	epsilon1 = 1e-6
+	epsilon2 = 1e-6
+	M        = float64(1e4)
 )
 
 func AddArtificialVariables(m *model.Model) *mat.Dense {
@@ -58,7 +58,44 @@ func DriveOutArtificialVars(m *model.Model, basis *mat.Dense) *mat.Dense {
 		}
 	}
 
-	panic("TODO")
+	for i, v := range m.V {
+		if v.IsArtificial && v.IsBasic {
+			l := slices.Index(basisIndexes, i)
+			inverseBasis := mat.DenseCopyOf(newBasis)
+			inverseBasis.Inverse(newBasis)
+
+			//compute B^-1*A, the pivot matrix
+			pivotMatrix := mat.DenseCopyOf(m.A)
+			pivotMatrix.Mul(inverseBasis, m.A)
+
+			//remove redundant rows or replace the columns in basis
+			removeRow := true
+			for j := range m.NumCols {
+				if !m.V[j].IsArtificial && pivotMatrix.At(l, j) != 0 {
+					removeRow = false
+					colData := mat.DenseCopyOf(m.A.ColView(j)).RawMatrix().Data
+					newBasis.SetCol(l, colData)
+					v.IsBasic = true
+					m.RemoveCol(i)
+					break
+				}
+			}
+			if removeRow {
+				m.RemoveRow(l)
+				m.RemoveCol(i)
+				basisIndexes = []int{}
+				basisIndex := 0
+				for i, v := range m.V {
+					if v.IsBasic {
+						basisIndexes = append(basisIndexes, i)
+						colData := mat.DenseCopyOf(m.A.ColView(i)).RawMatrix().Data
+						newBasis.SetCol(basisIndex, colData)
+						basisIndex++
+					}
+				}
+			}
+		}
+	}
 
 	return newBasis
 }

@@ -18,7 +18,8 @@ type Model struct {
 	V []*Variable
 
 	//C objective function coefficients
-	C *mat.Dense
+	C         *mat.Dense
+	originalC *mat.Dense
 
 	//A constraints matrix
 	A *mat.Dense
@@ -127,20 +128,24 @@ func (m *Model) RemoveCol(c int) error {
 	auxA := mat.NewDense(m.NumRows, m.NumCols-1, nil)
 	auxC := mat.NewDense(1, m.NumCols-1, nil)
 	auxX := mat.NewDense(m.NumCols-1, 1, nil)
+	newColIndex := 0
 	for col := range m.NumCols {
 		if col == c {
 			continue
 		}
 		for row := range m.NumRows {
-			auxA.Set(row, col, m.A.At(row, col))
+			auxA.Set(row, newColIndex, m.A.At(row, col))
 		}
-		auxC.Set(0, col, m.C.At(0, col))
-		auxX.Set(col, 0, m.X.At(col, 0))
+		auxC.Set(0, newColIndex, m.C.At(0, col))
+		auxX.Set(newColIndex, 0, m.X.At(col, 0))
+		newColIndex++
 	}
 
 	m.A = mat.DenseCopyOf(auxA)
 	m.C = mat.DenseCopyOf(auxC)
 	m.X = mat.DenseCopyOf(auxX)
+
+	m.V = append(m.V[:c], m.V[c+1:]...)
 	m.NumCols--
 
 	return nil
@@ -153,14 +158,16 @@ func (m *Model) RemoveRow(r int) error {
 
 	auxA := mat.NewDense(m.NumRows, m.NumCols-1, nil)
 	auxB := mat.NewDense(m.NumRows-1, 1, nil)
+	newRowIndex := 0
 	for row := range m.NumRows {
 		if row == r {
 			continue
 		}
 		for col := range m.NumCols {
-			auxA.Set(row, col, m.A.At(row, col))
+			auxA.Set(newRowIndex, col, m.A.At(row, col))
 		}
-		auxB.Set(row, 0, m.B.At(row, 0))
+		auxB.Set(newRowIndex, 0, m.B.At(row, 0))
+		newRowIndex++
 	}
 
 	m.A = mat.DenseCopyOf(auxA)
@@ -209,13 +216,24 @@ func (m *Model) UpdateVariablesValues() {
 	}
 }
 
-func (m *Model) ModifyOriginalPorblem() {
-	for c := range m.NumCols {
-		if m.V[c].IsArtificial {
-			continue
+func (m *Model) ModifyOriginalPorblem(phase uint8) {
+	if phase == 1 {
+		m.originalC = mat.DenseCopyOf(m.C)
+		for c := range m.NumCols {
+			if m.V[c].IsArtificial {
+				continue
+			}
+			m.C.Set(0, c, 0)
 		}
-		m.C.Set(0, c, 0)
+	} else if phase == 2 {
+		for c := range m.NumCols {
+			if m.V[c].IsArtificial {
+				continue
+			}
+			m.C.Set(0, c, m.originalC.At(0, c))
+		}
 	}
+
 }
 
 func (m *Model) PrintC() {
